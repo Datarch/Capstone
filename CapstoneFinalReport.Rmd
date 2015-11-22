@@ -1,0 +1,355 @@
+---
+title: "Data Science Capstone Report Yelp - Exploring business open/closed status"
+author: "TJ"
+date: "21 November 2015"
+output: pdf_document
+---
+
+## Introduction
+
+This report is created in scope of the Data Science Capstone Session Yelp, which is the final part of the Data Science Specialization in [Coursera](https://www.coursera.org/specializations/jhudatascience?utm_medium=courseDescripTop) and try to find the answer if the review text can predict the business open status. The exploratory analysis is checking if there is a relationship between a negative sentiment text and the closed businesses. 
+
+The null hypothesis is that the business closed status is independent from the review text sentiment rate. In case we can reject the null hypothesis then a prediction model can be built based on the review text. This model would be useful for business owners to use review text as indicator for a change in the way they are running their business, avoiding closing them.
+
+The data for this capstone come from [Yelp](http://www.yelp.com/), which is a business founded in 2004 to "help people find great local businesses like dentists, hair stylists and mechanics." 
+
+## Methods and Data
+
+Considering the huge amount of collected data by Yelp (second quarter of 2015: monthly average of 83 million unique visitors and more than 83 million reviews written) this experiment only process a preselcted [Yelp Dataset (575 MB)](https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/yelp_dataset_challenge_academic_dataset.zip) is a small representation of the whole available data. Considering the available computing capacity this project only provides an indication, whether the question is worth for further analysis or not.
+
+The [source data](https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/yelp_dataset_challenge_academic_dataset.zip) consists 5 data sets - **business, user, chek-in, tip, review** with 2 PDF documents on terms and agreement. 
+
+The *source Rmd file* with the whole analysis are avaible on [GitHub](https://github.com/Datarch/Capstone)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+knitr::opts_chunk$set(message=FALSE)
+library(doParallel)
+setwd("C:/Users/HP/Documents/Judit/Data_Science/Capstone/Project"); options("cores"); registerDoParallel(3)
+correlationMatrix <- readRDS("correlationMatrix.rds")
+training <- readRDS("training.rds")
+trainingValue <- readRDS("trainingValue.rds")
+trainingNum <- readRDS("trainingNum.rds")
+testing <- readRDS("testing.rds")
+testingValue <- readRDS("testingValue.rds")
+testingNum <- readRDS("testingNum.rds")
+```
+
+The method consists the following steps to clean the dataset and enable for analysis:
+
+1. Set working directory, load the required packages and the data sets into R. The source database were downloaded from the source and unzipped into the 'yelp_dataset_challenge_academic_dataset' directory. 'options("cores")' and 'registerDoParallel(3)' are used to allocate more computing resources.
+
+```{r library}
+library(RJSONIO);library(rjson);library(plyr);library(jsonlite)
+library(foreach);library(dplyr);library(reader);library(NLP);library(tm)
+library(ggplot2);library(corrplot);library(e1071);library(caret);library(SnowballC)
+library(AppliedPredictiveModeling);library(randomForest)
+setwd("C:/Users/HP/Documents/Judit/Data_Science/Capstone/Project")
+```
+
+```{r load data, eval=FALSE}
+fnames <- c('business', 'checkin', 'review_1', 'tip', 'user', 'review_2')
+jfile <- paste0(getwd(),'/yelp_dataset_challenge_academic_dataset/yelp_academic_dataset_',
+                fnames,'.json')
+business_data <- stream_in(file(jfile[1]))
+saveRDS(business_data, file = "business_data.rds")
+review_1_data <- stream_in(file(jfile[3]))
+saveRDS(review_1_data, file = "review_1_data.rds")
+tip_data <- stream_in(file(jfile[4])); saveRDS(tip_data, file = "tip_data.rds")
+```
+
+2. Clean the data sets to be ready for processing (the review data is sliced into smaller portion to enable processing and narrowed to only contain US data).
+
+```{r clean business, eval=FALSE}
+# Load the business data and select columns to be used
+business_data <- readRDS("business_data.rds")
+Business <- select(business_data, business_id, city, review_count, stars, open,
+                   categories)
+names(Business)[3:4] <- c("review_count_business", "stars_business")
+# Select only US located cities and assign to data frames
+USBusiness <- Business[grep("Pittsburgh|Charlotte|Champaign|Phoenix|Las Vegas|Madison",
+                            Business$city), ]
+```
+```{r, eval=FALSE, echo=FALSE}
+USBusiness[grep("Pittsburgh", USBusiness$city), 2] <- "Pittsburgh"
+USBusiness[grep("Charlotte", USBusiness$city), 2] <- "Charlotte"
+USBusiness[grep("Champaign", USBusiness$city), 2] <- "Champaign"
+USBusiness[grep("Phoenix", USBusiness$city), 2] <- "Phoenix"
+USBusiness[grep("Las Vegas", USBusiness$city), 2] <- "Las Vegas"
+USBusiness[grep("Madison", USBusiness$city), 2] <- "Madison"
+USBusiness$city <- as.factor(USBusiness$city)
+
+Categories <- c("Active Life","Arts & Entertainment","Automotive","Beauty & Spas","Bicycles","Education","Event Planning & Services","Financial Services","Food","Health & Medical","Home Services","Hotels & Travel","Local Flavor","Local Services","Mass Media","Nightlife","Pets","Professional Services","Public Services & Government","Real Estate","Religious Organizations","Restaurants","Shopping")
+```
+```{r, eval=FALSE, echo=FALSE}
+# assign primary category and and fill the primary category columns from categories
+USBusiness$primary_category <- "No Primary Category defined"
+for(i in 1:length(Categories)) {
+  USBusiness[grep(Categories[i], USBusiness$categories), 7] <- Categories[i]}
+USBusiness <- USBusiness[,-6]
+```
+
+```{r clean user, eval=FALSE}
+# Load the user data and select columns to be used
+user_data <- readRDS("user_data.rds")
+Users <- select(user_data, user_id, yelping_since, review_count, fans, average_stars,
+                votes, compliments)
+
+# transform yelping_from data to Date format
+Users$yelping_since <- paste(Users$yelping_since, "-01", sep = "")
+Users$yelping_since <- as.Date(Users$yelping_since)
+
+# separate votes into 3 columns and remove original votes column
+Users$votes_funny_user <- Users$votes$funny; Users$votes_useful_user <- Users$votes$useful
+Users$votes_cool_user <- Users$votes$cool; Users <- Users[, -6]
+```
+```{r, eval=FALSE, echo=FALSE}
+# separate compliments into 11 columns and remove original compliments column
+Users$compliments_profile <- Users$compliments$profile
+Users$compliments_cute <- Users$compliments$cute
+Users$compliments_funny <- Users$compliments$funny
+Users$compliments_plain <- Users$compliments$plain
+Users$compliments_writer <- Users$compliments$writer
+Users$compliments_note <- Users$compliments$note
+Users$compliments_photos <- Users$compliments$photos
+Users$compliments_hot <- Users$compliments$hot
+Users$compliments_cool <- Users$compliments$cool
+Users$compliments_more <- Users$compliments$more
+Users$compliments_list <- Users$compliments$list
+Users <- Users[, -6]
+
+# rename columns
+names(Users)[c(3, 5)] <- c("review_count_user", "average_star_user")
+```
+
+```{r clean review, eval=FALSE}
+# Load the review data and select columns to be used
+review_1_data <- readRDS("review_1_data.rds")
+USBusinessID <- as.data.frame(USBusiness[1])
+review_1_data_US <- merge(review_1_data, USBusinessID, by = "business_id")
+USReviews1 <- select(review_1_data_US, review_id, business_id, user_id, date, stars,
+                     votes, text)
+```
+```{r, eval=FALSE, echo=FALSE}
+# separate votes into 3 columns and remove original votes column
+USReviews1$votes_funny <- USReviews1$votes$funny
+USReviews1$votes_useful <- USReviews1$votes$useful
+USReviews1$votes_cool <- USReviews1$votes$cool
+USReviews1 <- USReviews1[, -6]
+
+# transform date data to Date format and cut into smaller slice
+USReviews1$date <- as.Date(USReviews1$date); USReviews1_1 <- USReviews1[45001:90000, ]
+```
+
+3. Process review data to include calculated values.
+
+```{r sentiment, eval=FALSE}
+# Count the length of the review text
+USReviews1_1$text_length <- nchar(USReviews1_1$text)
+
+# create functions to count the positive/negative sentiment words within the review text
+```
+```{r, eval=FALSE, echo=FALSE}
+positive_review <- function(data){ 
+  text <- data[ ,6]
+  reviews <- Corpus(VectorSource(text))
+  reviews <- tm_map(reviews, removeNumbers)
+  reviews <- tm_map(reviews, removePunctuation)
+  reviews <- tm_map(reviews, removeWords, words = stopwords("en"))
+  reviews <- tm_map(reviews, tolower)
+  reviews <- tm_map(reviews, stemDocument, language = "english")
+  
+  lp = length(readLines("positive-words.txt")) - 36
+  positive <- n.readLines("positive-words.txt", n = lp, comment = "#", skip = 36, header = FALSE)
+  
+  positive <- stemDocument(positive, language = "english")
+  positive <- positive[!duplicated(positive)]
+  
+  reviews <- tm_map(reviews, PlainTextDocument)
+  TDM_reviews_bin <- TermDocumentMatrix(reviews, control = list(weighting = weightBin))
+  TDM_reviews_bin <- removeSparseTerms( TDM_reviews_bin,1-(3/length(reviews)))
+  
+  positive_mat <- TDM_reviews_bin[rownames(TDM_reviews_bin) %in% positive, ]
+  positive_out <- apply(positive_mat, 2, sum)
+  
+  positive_out
+}
+negative_review <- function(data){ 
+  text <- data[ ,6]
+  reviews <- Corpus(VectorSource(text))
+  reviews <- tm_map(reviews, removeNumbers)
+  reviews <- tm_map(reviews, removePunctuation)
+  reviews <- tm_map(reviews, removeWords, words = stopwords("en"))
+  reviews <- tm_map(reviews, tolower)
+  reviews <- tm_map(reviews, stemDocument, language = "english")
+  
+  ln = length(readLines("negative-words.txt")) - 35
+  negative <- n.readLines("negative-words.txt", n = ln, comment = "#", skip = 35, header = FALSE)
+  
+  negative <- stemDocument(negative, language = "english")
+  negative <- negative[!duplicated(negative)]
+  
+  reviews <- tm_map(reviews, PlainTextDocument)
+  TDM_reviews_bin <- TermDocumentMatrix(reviews, control = list(weighting = weightBin))
+  TDM_reviews_bin <- removeSparseTerms( TDM_reviews_bin,1-(3/length(reviews)))
+  
+  negative_mat <- TDM_reviews_bin[rownames(TDM_reviews_bin) %in% negative, ]
+  negative_out <- apply(negative_mat, 2, sum)
+  
+  negative_out
+}
+```
+```{r, eval=FALSE}
+# run the function, then remove the text column and save the result into an RDS file
+USReviews1_1$positive_words <- positive_review(USReviews1_1)
+USReviews1_1$negative_words <- negative_review(USReviews1_1)
+USReviews1_1 <- USReviews1_1[, -6]
+```
+
+4. Merge review data set with US business and user data sets, then calculate the sentiment value and rate.
+
+```{r sentiment rate, eval=FALSE}
+# Merge the Reviews data frame with the Users and the USBusiness data frames
+USBusinessReviews1_1 <- merge(USReviews1_1, USBusiness, by = "business_id", incomp = NA)
+UserUSBusinessReviews1_1 <- merge(USBusinessReviews1_1, Users,by = "user_id",incomp = NA)
+
+# calculate sentiment rate for each review text
+# create factors with value labels
+```
+```{r, eval=FALSE, echo=FALSE}
+for(i in 1 : dim(UserUSBusinessReviews1_1)[1]) {
+  if(UserUSBusinessReviews1_1$positive_words[i] == 0 && UserUSBusinessReviews1_1$negative_words[i] == 0) {
+    UserUSBusinessReviews1_1$sentiment_rate[i] <- 1
+  } else if(UserUSBusinessReviews1_1$negative_words[i] == 0) {
+    UserUSBusinessReviews1_1$sentiment_rate[i] <- 50
+  } else if(UserUSBusinessReviews1_1$positive_words[i] == 0) {
+    UserUSBusinessReviews1_1$sentiment_rate[i] <- 0
+  } else {
+    UserUSBusinessReviews1_1$sentiment_rate[i] <- UserUSBusinessReviews1_1$positive_words[i] / UserUSBusinessReviews1_1$negative_words[i]
+  }
+}
+
+UserUSBusinessReviews1_1$sentiment <- UserUSBusinessReviews1_1$positive_words - UserUSBusinessReviews1_1$negative_words
+```
+```{r, eval=FALSE, echo=FALSE}
+# create factors with value labels
+UserUSBusinessReviews1_1$stars <- factor(UserUSBusinessReviews1_1$stars,levels=c(1,2,3,4,5), labels=c("1star","2stars","3stars","4stars","5stars"))
+UserUSBusinessReviews1_1$open <- factor(UserUSBusinessReviews1_1$open, abels=c("Closed","Open"))
+UserUSBusinessReviews1_1$stars_business <- factor(UserUSBusinessReviews1_1$stars_business,levels=c(1,2,3,4,5), labels=c("1star","2stars","3stars","4stars","5stars"))
+```
+
+**Data processing and exploratory analysis**
+
+After cleaning the dataset it is separated into training (70% of the data in UserUSBusinessReviews1_1 data set) and testing (30%) data sets to enable exploratory analysis and model selection.
+
+```{r, partition, eval=FALSE}
+## First create training and testing partitions from the trainData
+set.seed(1234)
+trainPart <- createDataPartition(y = UserUSBusinessReviews1_1$open, p=0.7, list = FALSE)
+training <- UserUSBusinessReviews1_1[trainPart, ]
+testing <- UserUSBusinessReviews1_1[-trainPart, ]
+# change class of character columns to factor variables
+# removing columns where values are NAs in majority
+```
+```{r, eval=FALSE, echo=FALSE}
+# change class of character columns to factor variables
+f <- c(1,2,3,16)
+for(i in 1:length(f)){
+  training[, f[i]] <- as.factor(training[, f[i]])
+  testing[, f[i]] <- as.factor(testing[, f[i]])
+}
+
+# removing columns where values are NAs in majority
+trainingValue <- training[, -c(14, 24:34)]; testingValue <- testing[, -c(14, 24:34)]
+```
+
+First start with graphical exploration of the training dataset and especially checking if the variables are correlated using a corrleation matrix:
+
+```{r correlation, eval=FALSE}
+# create correlation matrix to see if variables are correlated
+trainingNum <- trainingValue; testingNum <- testingValue
+for(i in 1:24){
+  trainingNum[,i] <- as.numeric(trainingValue[,i])
+  testingNum[,i] <- as.numeric(testingValue[,i])
+}
+correlationMatrix <- cor(trainingNum)
+```
+
+The other method used to test the null hypothesis is the Fisher test.
+
+```{r, Fisher test}
+# create open and star vector to store the values
+open <- training$open; open[is.na(open)] <- FALSE
+stars <- training$stars
+# create sentiment and sentiment_rate values to test with open and stars
+sentiment <- training$sentiment
+sentiment[is.na(sentiment)] <- FALSE; sentiment[sentiment < 1] <- FALSE
+sentiment[sentiment > 0] <- TRUE; sentiment <- as.logical(sentiment)
+sentimentXtab <- table(open, sentiment)
+sentiment_rate <- training$sentiment_rate
+sentiment_rate[is.na(sentiment_rate)] <- FALSE
+sentiment_rate[sentiment_rate < 1] <- FALSE
+sentiment_rate[sentiment_rate >= 1] <- TRUE
+sentiment_rate <- as.logical(sentiment_rate)
+sentiment_rateXtab <- table(open, sentiment_rate)
+sentiment_rate <- training$sentiment_rate
+sentiment_rate[sentiment_rate == 0] <- 100
+sentiment_rate[sentiment_rate < 1] <- 200
+sentiment_rate[sentiment_rate == 1] <- 300
+sentiment_rate[sentiment_rate < 50] <- 400
+sentiment_rate[sentiment_rate == 50] <- 500
+sentiment_rate <- sentiment_rate /100
+sent_rateXtabStars <- table(stars, sentiment_rate)
+# Calculate the P-values with Fisher test
+sentimentFTpV <- fisher.test(sentimentXtab, simulate.p.value = TRUE)$p.value
+sentiment_rateFTpV <- fisher.test(sentiment_rateXtab, simulate.p.value = TRUE)$p.value
+sentiment_rateFTpVS <- fisher.test(sent_rateXtabStars,simulate.p.value = TRUE)$p.value
+```
+
+## Results
+
+The correlation Matrix in original order of the values and in principal component order:
+
+```{r corrplot, echo=FALSE}
+# plot the correlation matrix
+correlationMatrix <- readRDS("correlationMatrix.rds")
+par(mfrow=c(1,2))
+corrplot(correlationMatrix, order = "original", method = "circle", tl.cex = 0.6, tl.col = rgb(0,0,0))
+corrplot(correlationMatrix, order = "FPC", method = "circle", tl.cex = 0.6, tl.col = rgb(0,0,0))
+```
+
+The above plots show that there is no correlation between the open status and other variables. The P-values of the Fisher test are the following:
+
+Fisher test P-value for open vs. sentiment value: `r sentimentFTpV`.
+
+Fisher test P-value for open vs. sentiment rate: `r sentiment_rateFTpV`.
+
+Fisher test P-value for stars vs. sentiment rate: 
+```{r, echo=FALSE}
+sentiment_rateFTpVS
+```
+
+## Discussion
+
+Correlation Matrix shows almost no correlation between open and sentiment value or rate and Fisher test resulted higher P-values, which suggest that the null hypothesis is true, and the open value is independent from the review text sentiment value or rate. The Fisher test also used to test the independence of review star with sentiment rate, in that case the much lower P-value suggest relation between the tested cases.
+
+This implicates, that the data set has not enough information to use for open status prediction, supporting business owners with early warning prior to close the business.
+
+
+## Reference
+
+**[The source Rmd file](https://github.com/Datarch/Capstone)** avaible on GitHub.
+
+**[Yelp](http://www.yelp.com/) Dataset** available at [Yelp](http://www.yelp.com/) site:
+[Yelp Dataset (575 MB)](https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/yelp_dataset_challenge_academic_dataset.zip)
+[This site](http://www.yelp.com/dataset_challenge) describes the challenge and the structure of the datasets.
+
+**Opinion Lexicon: Positive** and **Negative**                                                   
+The files and the papers can all be downloaded from [this link](http://www.cs.uic.edu/~liub/FBS/sentiment-analysis.html).
+
+Minqing Hu and Bing Liu - Mining and Summarizing Customer Reviews. Proceedings of the ACM SIGKDD International Conference on Knowledge Discovery and Data Mining (KDD-2004), Aug 22-25, 2004, Seattle, Washington, USA,
+
+Bing Liu, Minqing Hu and Junsheng Cheng - Opinion Observer: Analyzing and Comparing Opinions on the Web. Proceedings of the 14th International World Wide Web conference (WWW-2005), May 10-14, 2005, Chiba, Japan.
+
+[Source of negative and positive words text files](https://github.com/jeffreybreen/twitter-sentiment-analysis-tutorial-201107/tree/master/data/opinion-lexicon-English)
+
